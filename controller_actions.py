@@ -26,6 +26,7 @@ class ControllerActions:
         w.speed_slider.valueChanged.connect(self.on_speed_changed)
         w.apply_url_btn.clicked.connect(self.on_apply_rtsp_clicked)
         w.use_default_btn.clicked.connect(self.on_use_default_rtsp_clicked)
+        w.panel_toggle_btn.clicked.connect(self.on_panel_toggle_clicked)
 
         self.bind_move_button(w.btn_up, "up")
         self.bind_move_button(w.btn_right, "right")
@@ -62,6 +63,10 @@ class ControllerActions:
     def on_use_default_rtsp_clicked(self):
         self.log_action("use_default_rtsp_clicked")
         self.window.use_default_rtsp_url()
+
+    def on_panel_toggle_clicked(self):
+        self.log_action("panel_toggle_clicked")
+        self.window.toggle_control_panel()
 
     def on_move_pressed(self, move_value: str):
         self.log_action(f"move_pressed:{move_value}")

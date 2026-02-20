@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass
 
 import cv2
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import QThread, Qt, Signal, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -125,6 +125,8 @@ class ControllerWindow(QMainWindow):
         self.default_rtsp_url = CAMERA_RTSP_URL
         self.current_rtsp_url = CAMERA_RTSP_URL
         self.reader = None
+        self.panel_expanded_width = 330
+        self.panel_visible = True
 
         self._build_ui()
         self.actions = ControllerActions(self)
@@ -171,6 +173,9 @@ class ControllerWindow(QMainWindow):
 
         control_panel = QFrame()
         control_panel.setObjectName("controlPanel")
+        control_panel.setMinimumWidth(0)
+        control_panel.setMaximumWidth(self.panel_expanded_width)
+        self.control_panel = control_panel
         controls = QVBoxLayout(control_panel)
         controls.setContentsMargins(12, 12, 12, 12)
         controls.setSpacing(10)
@@ -180,8 +185,17 @@ class ControllerWindow(QMainWindow):
         tabs.addTab(self._build_settings_tab(), "Settings")
         controls.addWidget(tabs)
 
+        self.panel_toggle_btn = QPushButton("❯")
+        self.panel_toggle_btn.setObjectName("panelToggleBtn")
+        self.panel_toggle_btn.setFixedWidth(24)
+
+        self.panel_animation = QPropertyAnimation(self.control_panel, b"maximumWidth", self)
+        self.panel_animation.setDuration(280)
+        self.panel_animation.setEasingCurve(QEasingCurve.InOutCubic)
+
         shell.addWidget(stream_panel, 1)
         shell.addWidget(control_panel, 0)
+        shell.addWidget(self.panel_toggle_btn, 0, alignment=Qt.AlignVCenter)
 
     def _build_control_tab(self):
         tab = QWidget()
@@ -305,6 +319,27 @@ class ControllerWindow(QMainWindow):
         self.reader.stream_status.connect(self.actions.on_stream_status)
         self.reader.start()
 
+    def toggle_control_panel(self):
+        target_visible = not self.panel_visible
+        start_width = self.control_panel.maximumWidth()
+        end_width = self.panel_expanded_width if target_visible else 0
+
+        self.panel_animation.stop()
+        self.panel_animation.setStartValue(start_width)
+        self.panel_animation.setEndValue(end_width)
+        self.panel_animation.start()
+
+        self.panel_visible = target_visible
+        self._update_panel_toggle_ui()
+
+    def _update_panel_toggle_ui(self):
+        if self.panel_visible:
+            self.panel_toggle_btn.setText("❯")
+            self.panel_toggle_btn.setToolTip("Hide Control/Settings Panel")
+        else:
+            self.panel_toggle_btn.setText("❮")
+            self.panel_toggle_btn.setToolTip("Show Control/Settings Panel")
+
     def _build_binary_switch(self, title_text, left_text, right_text, kind):
         group = QFrame()
         group.setObjectName("group")
@@ -396,8 +431,6 @@ class ControllerWindow(QMainWindow):
                 border-radius: 18px;
             }
             #controlPanel {
-                min-width: 330px;
-                max-width: 330px;
                 background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(255,255,255,0.92), stop:1 rgba(225,255,246,0.92));
             }
             #title {
@@ -537,6 +570,20 @@ class ControllerWindow(QMainWindow):
                 color: #1d4950;
             }
             QPushButton:pressed {
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #ff9152, stop:1 #ffd069);
+                color: #2f1804;
+            }
+            #panelToggleBtn {
+                border: 1px solid rgba(16,72,78,0.22);
+                border-radius: 12px;
+                min-height: 64px;
+                max-height: 64px;
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #00c6a6, stop:1 #00a7d6);
+                color: #ffffff;
+                font-size: 16px;
+                font-weight: 800;
+            }
+            #panelToggleBtn:pressed {
                 background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #ff9152, stop:1 #ffd069);
                 color: #2f1804;
             }
