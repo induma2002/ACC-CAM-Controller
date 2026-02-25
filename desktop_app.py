@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import cv2
 from PySide6.QtCore import QThread, Qt, Signal, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QIntValidator
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -24,8 +24,11 @@ from PySide6.QtWidgets import (
 )
 
 from controller_actions import ControllerActions
+from viewpro_gimbal import ViewProGimbal
 
-CAMERA_RTSP_URL = "rtsp://192.168.87.49:8554/h264"
+CAMERA_RTSP_URL = "rtsp://192.168.1.7:8554/h264"
+GIMBAL_TCP_IP = "192.168.1.7"
+GIMBAL_TCP_PORT = 2000
 
 
 @dataclass
@@ -124,16 +127,33 @@ class ControllerWindow(QMainWindow):
         self.state = AppState()
         self.default_rtsp_url = CAMERA_RTSP_URL
         self.current_rtsp_url = CAMERA_RTSP_URL
+        self.default_gimbal_ip = GIMBAL_TCP_IP
+        self.default_gimbal_port = GIMBAL_TCP_PORT
+        self.current_gimbal_ip = GIMBAL_TCP_IP
+        self.current_gimbal_port = GIMBAL_TCP_PORT
         self.reader = None
         self.panel_expanded_width = 330
         self.panel_visible = True
+        self.gimbal = ViewProGimbal(host=self.current_gimbal_ip, port=self.current_gimbal_port)
 
         self._build_ui()
         self.actions = ControllerActions(self)
         self.actions.bind_events()
         self._apply_theme()
         self.actions.render_state()
+        self._connect_gimbal()
         self._restart_stream_reader()
+
+    def _connect_gimbal(self):
+        try:
+            self.gimbal.connect()
+            if hasattr(self, "settings_status_label"):
+                self.settings_status_label.setText(
+                    f"Gimbal connected: {self.current_gimbal_ip}:{self.current_gimbal_port}"
+                )
+        except Exception as ex:
+            if hasattr(self, "settings_status_label"):
+                self.settings_status_label.setText(f"Gimbal connection failed: {ex}")
 
     def _build_ui(self):
         root = QWidget()
@@ -266,33 +286,63 @@ class ControllerWindow(QMainWindow):
         group_layout.setContentsMargins(10, 10, 10, 10)
         group_layout.setSpacing(8)
 
-        title = QLabel("STREAM SETTINGS")
+        title = QLabel("NETWORK SETTINGS")
         title.setObjectName("groupTitle")
 
-        default_label = QLabel(f"Default RTSP: {self.default_rtsp_url}")
-        default_label.setWordWrap(True)
+        default_rtsp_label = QLabel(f"Default RTSP: {self.default_rtsp_url}")
+        default_rtsp_label.setWordWrap(True)
+        default_gimbal_label = QLabel(
+            f"Default Gimbal TCP: {self.default_gimbal_ip}:{self.default_gimbal_port}"
+        )
+        default_gimbal_label.setWordWrap(True)
 
-        input_label = QLabel("RTSP URL Override")
+        input_label = QLabel("RTSP URL")
         input_label.setObjectName("groupTitle")
         self.rtsp_input = QLineEdit()
         self.rtsp_input.setPlaceholderText("Enter RTSP URL (leave empty to use default)")
         self.rtsp_input.setText(self.default_rtsp_url)
 
+        gimbal_ip_label = QLabel("Gimbal IP")
+        gimbal_ip_label.setObjectName("groupTitle")
+        self.gimbal_ip_input = QLineEdit()
+        self.gimbal_ip_input.setPlaceholderText("e.g. 192.168.2.119")
+        self.gimbal_ip_input.setText(self.current_gimbal_ip)
+
+        gimbal_port_label = QLabel("Gimbal Port")
+        gimbal_port_label.setObjectName("groupTitle")
+        self.gimbal_port_input = QLineEdit()
+        self.gimbal_port_input.setValidator(QIntValidator(1, 65535, self))
+        self.gimbal_port_input.setPlaceholderText("e.g. 2000")
+        self.gimbal_port_input.setText(str(self.current_gimbal_port))
+
         btn_row = QHBoxLayout()
-        self.apply_url_btn = QPushButton("Apply URL")
-        self.use_default_btn = QPushButton("Use Default")
+        self.apply_url_btn = QPushButton("Apply Network")
+        self.use_default_btn = QPushButton("Use Defaults")
         btn_row.addWidget(self.apply_url_btn)
         btn_row.addWidget(self.use_default_btn)
 
         self.active_url_label = QLabel(f"Active URL: {self.current_rtsp_url}")
         self.active_url_label.setWordWrap(True)
+        self.active_gimbal_label = QLabel(
+            f"Active Gimbal TCP: {self.current_gimbal_ip}:{self.current_gimbal_port}"
+        )
+        self.active_gimbal_label.setWordWrap(True)
+        self.settings_status_label = QLabel("Ready")
+        self.settings_status_label.setWordWrap(True)
 
         group_layout.addWidget(title)
-        group_layout.addWidget(default_label)
+        group_layout.addWidget(default_rtsp_label)
+        group_layout.addWidget(default_gimbal_label)
         group_layout.addWidget(input_label)
         group_layout.addWidget(self.rtsp_input)
+        group_layout.addWidget(gimbal_ip_label)
+        group_layout.addWidget(self.gimbal_ip_input)
+        group_layout.addWidget(gimbal_port_label)
+        group_layout.addWidget(self.gimbal_port_input)
         group_layout.addLayout(btn_row)
         group_layout.addWidget(self.active_url_label)
+        group_layout.addWidget(self.active_gimbal_label)
+        group_layout.addWidget(self.settings_status_label)
 
         layout.addWidget(url_group)
         layout.addStretch(1)
@@ -300,15 +350,53 @@ class ControllerWindow(QMainWindow):
 
     def apply_rtsp_url(self, input_url: str):
         url = input_url.strip() or self.default_rtsp_url
+        should_restart = url != self.current_rtsp_url
         self.current_rtsp_url = url
         self.active_url_label.setText(f"Active URL: {url}")
-        self.stream_note.setText(f"Opening RTSP: {url}")
-        self.status_badge.setText("CONNECTING")
-        self._restart_stream_reader()
+        if should_restart:
+            self.stream_note.setText(f"Opening RTSP: {url}")
+            self.status_badge.setText("CONNECTING")
+            self._restart_stream_reader()
 
     def use_default_rtsp_url(self):
         self.rtsp_input.setText(self.default_rtsp_url)
         self.apply_rtsp_url("")
+
+    def apply_network_settings(self, rtsp_url: str, gimbal_ip: str, gimbal_port: str):
+        ip = gimbal_ip.strip() or self.default_gimbal_ip
+        try:
+            port = int((gimbal_port or "").strip() or self.default_gimbal_port)
+            if not (1 <= port <= 65535):
+                raise ValueError("Port must be in range 1-65535")
+        except ValueError:
+            self.settings_status_label.setText("Invalid gimbal port. Use a number between 1 and 65535.")
+            return
+
+        self.apply_rtsp_url(rtsp_url)
+
+        gimbal_changed = ip != self.current_gimbal_ip or port != self.current_gimbal_port
+        if gimbal_changed:
+            self._reconnect_gimbal(ip, port)
+        else:
+            self.settings_status_label.setText("Network settings applied.")
+
+    def use_default_network_settings(self):
+        self.rtsp_input.setText(self.default_rtsp_url)
+        self.gimbal_ip_input.setText(self.default_gimbal_ip)
+        self.gimbal_port_input.setText(str(self.default_gimbal_port))
+        self.apply_network_settings("", self.default_gimbal_ip, str(self.default_gimbal_port))
+
+    def _reconnect_gimbal(self, ip: str, port: int):
+        try:
+            self.gimbal.disconnect()
+        except Exception:
+            pass
+
+        self.current_gimbal_ip = ip
+        self.current_gimbal_port = port
+        self.gimbal = ViewProGimbal(host=ip, port=port)
+        self.active_gimbal_label.setText(f"Active Gimbal TCP: {ip}:{port}")
+        self._connect_gimbal()
 
     def _restart_stream_reader(self):
         if self.reader is not None and self.reader.isRunning():
@@ -593,6 +681,8 @@ class ControllerWindow(QMainWindow):
     def closeEvent(self, event):
         if hasattr(self, "reader") and self.reader.isRunning():
             self.reader.stop()
+        if hasattr(self, "gimbal"):
+            self.gimbal.disconnect()
         super().closeEvent(event)
 
 

@@ -10,7 +10,7 @@ class ControllerActions:
     def __init__(self, window):
         self.window = window
         self.repeat_timer = QTimer(self.window)
-        self.repeat_timer.setInterval(120)
+        self.repeat_timer.setInterval(self._repeat_interval_from_speed(self.window.state.speed))
         self.repeat_timer.timeout.connect(self._emit_repeat_move)
         self.active_move = None
 
@@ -52,17 +52,21 @@ class ControllerActions:
         self.log_action("view_video_clicked")
 
     def on_speed_changed(self, value: int):
+        self.window.state.speed = value
+        self.repeat_timer.setInterval(self._repeat_interval_from_speed(value))
+        self.render_state()
         self.log_action(f"speed_changed:{value}")
 
     def on_apply_rtsp_clicked(self):
         url = self.window.rtsp_input.text().strip()
-        effective = url or self.window.default_rtsp_url
-        self.log_action(f"apply_rtsp_clicked:{effective}")
-        self.window.apply_rtsp_url(url)
+        gimbal_ip = self.window.gimbal_ip_input.text().strip()
+        gimbal_port = self.window.gimbal_port_input.text().strip()
+        self.log_action(f"apply_network_clicked:rtsp={url or self.window.default_rtsp_url},gimbal={gimbal_ip or self.window.default_gimbal_ip}:{gimbal_port or self.window.default_gimbal_port}")
+        self.window.apply_network_settings(url, gimbal_ip, gimbal_port)
 
     def on_use_default_rtsp_clicked(self):
-        self.log_action("use_default_rtsp_clicked")
-        self.window.use_default_rtsp_url()
+        self.log_action("use_default_network_clicked")
+        self.window.use_default_network_settings()
 
     def on_panel_toggle_clicked(self):
         self.log_action("panel_toggle_clicked")
@@ -72,18 +76,47 @@ class ControllerActions:
         self.log_action(f"move_pressed:{move_value}")
         if move_value in {"up", "right", "down", "left"}:
             self.active_move = move_value
+            self.window.state.movement = move_value
+            self._send_active_move()
+            self.render_state()
             if not self.repeat_timer.isActive():
                 self.repeat_timer.start()
+        elif move_value == "home":
+            self.active_move = None
+            self.repeat_timer.stop()
+            self.window.gimbal.stop()
+            self.window.state.movement = "idle"
+            self.render_state()
 
     def on_move_released(self, move_value: str):
         self.log_action(f"move_released:{move_value}")
         if self.active_move == move_value:
             self.active_move = None
             self.repeat_timer.stop()
+            self.window.gimbal.stop()
+            self.window.state.movement = "idle"
+            self.render_state()
 
     def _emit_repeat_move(self):
         if self.active_move:
+            self._send_active_move()
             self.log_action(f"move_repeat:{self.active_move}")
+
+    def _send_active_move(self):
+        speed = self.window.state.speed
+        if self.active_move == "up":
+            self.window.gimbal.move(0, speed)
+        elif self.active_move == "down":
+            self.window.gimbal.move(0, -speed)
+        elif self.active_move == "left":
+            self.window.gimbal.move(speed, 0)
+        elif self.active_move == "right":
+            self.window.gimbal.move(-speed, 0)
+
+    @staticmethod
+    def _repeat_interval_from_speed(speed: int) -> int:
+        speed = max(0, min(100, int(speed)))
+        return int(220 - (speed * 1.8))
 
     def log_action(self, action: str):
         print(f"[UI_ACTION] {action}", flush=True)
