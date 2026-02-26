@@ -2,13 +2,16 @@ import os
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
 import cv2
-from PySide6.QtCore import QThread, Qt, Signal, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QFont, QIntValidator
+from PySide6.QtCore import QEvent, QThread, Qt, Signal, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QFont, QIntValidator, QKeyEvent
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -26,8 +29,8 @@ from PySide6.QtWidgets import (
 from controller_actions import ControllerActions
 from viewpro_gimbal import ViewProGimbal
 
-CAMERA_RTSP_URL = "rtsp://192.168.1.7:8554/h264"
-GIMBAL_TCP_IP = "192.168.1.7"
+CAMERA_RTSP_URL = "rtsp://192.168.2.119:554"
+GIMBAL_TCP_IP = "192.168.2.119"
 GIMBAL_TCP_PORT = 2000
 
 
@@ -36,7 +39,7 @@ class AppState:
     mode: str = "auto"
     view: str = "thermal"
     movement: str = "idle"
-    speed: int = 35
+    speed: int = 100
 
 
 class RtspReader(QThread):
@@ -118,6 +121,91 @@ class RtspReader(QThread):
                 time.sleep(reconnect_delay)
 
 
+class SegmentRecorder:
+    def __init__(self, output_dir: Path, segment_seconds: int = 300, fps: float = 20.0):
+        self.output_dir = output_dir
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.segment_seconds = segment_seconds
+        self.fps = fps
+        self._is_recording = False
+        self._writer = None
+        self._segment_started_at = 0.0
+        self._segment_mode = ""
+        self._segment_index = 0
+        self._frame_size = None
+        self._current_path = None
+
+    @property
+    def is_recording(self) -> bool:
+        return self._is_recording
+
+    @property
+    def current_path(self):
+        return self._current_path
+
+    def start(self):
+        self._is_recording = True
+        self._segment_index = 0
+        self._segment_started_at = 0.0
+        self._segment_mode = ""
+        self._frame_size = None
+        self._current_path = None
+
+    def stop(self):
+        self._is_recording = False
+        self._release_writer()
+        self._current_path = None
+
+    def set_segment_seconds(self, seconds: int):
+        self.segment_seconds = max(30, int(seconds))
+        if self._is_recording and self._writer is not None:
+            # Force segment rollover on next frame so new duration applies immediately.
+            self._segment_started_at = 0.0
+
+    def write_frame(self, frame, view_mode: str):
+        if not self._is_recording:
+            return None
+
+        h, w = frame.shape[:2]
+        frame_size = (w, h)
+        now = time.time()
+        segment_expired = (now - self._segment_started_at) >= self.segment_seconds
+        view_changed = view_mode != self._segment_mode
+        size_changed = self._frame_size != frame_size
+
+        if self._writer is None or segment_expired or view_changed or size_changed:
+            self._start_new_segment(frame_size, view_mode, now)
+
+        if self._writer is not None:
+            self._writer.write(frame)
+
+        return self._current_path
+
+    def _start_new_segment(self, frame_size, view_mode: str, started_at: float):
+        self._release_writer()
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_mode = (view_mode or "unknown").lower()
+        file_name = f"{stamp}_{safe_mode}_{self._segment_index:03d}.mp4"
+        path = self.output_dir / file_name
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(str(path), fourcc, self.fps, frame_size)
+        if not writer.isOpened():
+            self._current_path = None
+            return
+
+        self._writer = writer
+        self._segment_started_at = started_at
+        self._segment_mode = view_mode
+        self._frame_size = frame_size
+        self._current_path = path
+        self._segment_index += 1
+
+    def _release_writer(self):
+        if self._writer is not None:
+            self._writer.release()
+            self._writer = None
+
+
 class ControllerWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -135,6 +223,10 @@ class ControllerWindow(QMainWindow):
         self.panel_expanded_width = 330
         self.panel_visible = True
         self.gimbal = ViewProGimbal(host=self.current_gimbal_ip, port=self.current_gimbal_port)
+        self.recorder = SegmentRecorder(Path(__file__).resolve().parent / "recordings", segment_seconds=300)
+        self.segment_minutes = 5
+        self.latest_frame = None
+        self._active_keyboard_moves = set()
 
         self._build_ui()
         self.actions = ControllerActions(self)
@@ -143,6 +235,9 @@ class ControllerWindow(QMainWindow):
         self.actions.render_state()
         self._connect_gimbal()
         self._restart_stream_reader()
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.installEventFilter(self)
+        QApplication.instance().installEventFilter(self)
 
     def _connect_gimbal(self):
         try:
@@ -270,9 +365,45 @@ class ControllerWindow(QMainWindow):
             tele_layout.addWidget(v, r, 1, alignment=Qt.AlignRight)
 
         controls.addWidget(telemetry)
+        controls.addWidget(self._build_recording_panel())
         controls.addStretch(1)
         controls.addWidget(self._build_dpad())
         return tab
+
+    def _build_recording_panel(self):
+        group = QFrame()
+        group.setObjectName("group")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        title = QLabel("RECORDING")
+        title.setObjectName("groupTitle")
+
+        row = QHBoxLayout()
+        self.record_toggle_btn = QPushButton("Start Rec")
+        self.take_image_btn = QPushButton("Take Image")
+        row.addWidget(self.record_toggle_btn)
+        row.addWidget(self.take_image_btn)
+
+        self.record_status_label = QLabel("Recorder idle")
+        self.record_status_label.setWordWrap(True)
+
+        duration_row = QHBoxLayout()
+        duration_label = QLabel("Segment (min)")
+        duration_label.setObjectName("groupTitle")
+        self.segment_duration_combo = QComboBox()
+        self.segment_duration_combo.addItems(["1", "2", "5", "10", "15"])
+        self.segment_duration_combo.setCurrentText(str(self.segment_minutes))
+        duration_row.addWidget(duration_label)
+        duration_row.addStretch()
+        duration_row.addWidget(self.segment_duration_combo)
+
+        layout.addWidget(title)
+        layout.addLayout(row)
+        layout.addLayout(duration_row)
+        layout.addWidget(self.record_status_label)
+        return group
 
     def _build_settings_tab(self):
         tab = QWidget()
@@ -406,6 +537,61 @@ class ControllerWindow(QMainWindow):
         self.reader.frame_ready.connect(self.actions.on_frame)
         self.reader.stream_status.connect(self.actions.on_stream_status)
         self.reader.start()
+
+    def start_recording(self):
+        if self.recorder.is_recording:
+            return
+        self.recorder.start()
+        self.record_toggle_btn.setText("Stop Rec")
+        self.record_status_label.setText(
+            f"Recording... new file every {self.segment_minutes} min ({self.state.view.title()} mode)"
+        )
+
+    def stop_recording(self):
+        if not self.recorder.is_recording:
+            return
+        self.recorder.stop()
+        self.record_toggle_btn.setText("Start Rec")
+        self.record_status_label.setText("Recorder stopped")
+
+    def write_recording_frame(self, frame):
+        if not self.recorder.is_recording:
+            return
+        current_file = self.recorder.write_frame(frame, self.state.view)
+        if current_file is not None:
+            self.record_status_label.setText(f"Recording: {current_file.name}")
+
+    def set_segment_duration_minutes(self, minutes: int):
+        self.segment_minutes = max(1, int(minutes))
+        self.recorder.set_segment_seconds(self.segment_minutes * 60)
+        if self.recorder.is_recording:
+            self.record_status_label.setText(
+                f"Recording... segment set to {self.segment_minutes} min"
+            )
+        else:
+            self.record_status_label.setText(
+                f"Recorder idle (segment: {self.segment_minutes} min)"
+            )
+
+    def update_latest_frame(self, frame):
+        self.latest_frame = frame.copy()
+
+    def take_snapshot(self):
+        if self.latest_frame is None:
+            self.record_status_label.setText("No frame available for snapshot")
+            return
+
+        snapshots_dir = Path(__file__).resolve().parent / "snapshots"
+        snapshots_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        file_name = f"{stamp}_{self.state.view.lower()}.jpg"
+        path = snapshots_dir / file_name
+
+        ok = cv2.imwrite(str(path), self.latest_frame)
+        if ok:
+            self.record_status_label.setText(f"Snapshot saved: {file_name}")
+        else:
+            self.record_status_label.setText("Snapshot save failed")
 
     def toggle_control_panel(self):
         target_visible = not self.panel_visible
@@ -679,11 +865,77 @@ class ControllerWindow(QMainWindow):
         )
 
     def closeEvent(self, event):
+        if hasattr(self, "recorder"):
+            self.recorder.stop()
         if hasattr(self, "reader") and self.reader.isRunning():
             self.reader.stop()
         if hasattr(self, "gimbal"):
             self.gimbal.disconnect()
         super().closeEvent(event)
+
+    def eventFilter(self, watched, event):
+        if event.type() not in (QEvent.ShortcutOverride, QEvent.KeyPress, QEvent.KeyRelease):
+            return super().eventFilter(watched, event)
+
+        if isinstance(self.focusWidget(), QLineEdit):
+            return super().eventFilter(watched, event)
+
+        key_event = event if isinstance(event, QKeyEvent) else None
+        if key_event is None:
+            return super().eventFilter(watched, event)
+
+        handled_keys = {Qt.Key_Up, Qt.Key_Right, Qt.Key_Down, Qt.Key_Left}
+        is_ctrl_h = key_event.key() == Qt.Key_H and (key_event.modifiers() & Qt.ControlModifier)
+
+        if event.type() == QEvent.ShortcutOverride and (key_event.key() in handled_keys or is_ctrl_h):
+            event.accept()
+            return True
+
+        if key_event.type() == QEvent.KeyPress:
+            if key_event.isAutoRepeat():
+                return True
+            return self._handle_key_press(key_event)
+
+        if key_event.isAutoRepeat():
+            return True
+        return self._handle_key_release(key_event)
+
+    def _handle_key_press(self, event: QKeyEvent) -> bool:
+        key_to_move = {
+            Qt.Key_Up: "up",
+            Qt.Key_Right: "right",
+            Qt.Key_Down: "down",
+            Qt.Key_Left: "left",
+        }
+
+        move = key_to_move.get(event.key())
+        if move:
+            if move not in self._active_keyboard_moves:
+                self._active_keyboard_moves.add(move)
+                self.actions.on_move_pressed(move)
+            return True
+
+        if event.key() == Qt.Key_H and (event.modifiers() & Qt.ControlModifier):
+            self.actions.on_move_pressed("home")
+            return True
+
+        return False
+
+    def _handle_key_release(self, event: QKeyEvent) -> bool:
+        key_to_move = {
+            Qt.Key_Up: "up",
+            Qt.Key_Right: "right",
+            Qt.Key_Down: "down",
+            Qt.Key_Left: "left",
+        }
+
+        move = key_to_move.get(event.key())
+        if move:
+            self._active_keyboard_moves.discard(move)
+            self.actions.on_move_released(move)
+            return True
+
+        return False
 
 
 if __name__ == "__main__":

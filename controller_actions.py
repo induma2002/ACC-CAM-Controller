@@ -1,7 +1,6 @@
 from functools import partial
 
 import cv2
-from PySide6.QtCore import QTimer
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QPushButton
 
@@ -9,9 +8,6 @@ from PySide6.QtWidgets import QPushButton
 class ControllerActions:
     def __init__(self, window):
         self.window = window
-        self.repeat_timer = QTimer(self.window)
-        self.repeat_timer.setInterval(self._repeat_interval_from_speed(self.window.state.speed))
-        self.repeat_timer.timeout.connect(self._emit_repeat_move)
         self.active_move = None
 
     def bind_events(self):
@@ -26,6 +22,9 @@ class ControllerActions:
         w.speed_slider.valueChanged.connect(self.on_speed_changed)
         w.apply_url_btn.clicked.connect(self.on_apply_rtsp_clicked)
         w.use_default_btn.clicked.connect(self.on_use_default_rtsp_clicked)
+        w.record_toggle_btn.clicked.connect(self.on_record_toggle_clicked)
+        w.take_image_btn.clicked.connect(self.on_take_image_clicked)
+        w.segment_duration_combo.currentTextChanged.connect(self.on_segment_duration_changed)
         w.panel_toggle_btn.clicked.connect(self.on_panel_toggle_clicked)
 
         self.bind_move_button(w.btn_up, "up")
@@ -47,13 +46,18 @@ class ControllerActions:
 
     def on_view_thermal_clicked(self):
         self.log_action("view_thermal_clicked")
+        self.window.gimbal.set_view_mode("ir")
+        self.window.state.view = "thermal"
+        self.render_state()
 
     def on_view_video_clicked(self):
         self.log_action("view_video_clicked")
+        self.window.gimbal.set_view_mode("visible")
+        self.window.state.view = "visible"
+        self.render_state()
 
     def on_speed_changed(self, value: int):
         self.window.state.speed = value
-        self.repeat_timer.setInterval(self._repeat_interval_from_speed(value))
         self.render_state()
         self.log_action(f"speed_changed:{value}")
 
@@ -72,6 +76,26 @@ class ControllerActions:
         self.log_action("panel_toggle_clicked")
         self.window.toggle_control_panel()
 
+    def on_record_toggle_clicked(self):
+        if self.window.recorder.is_recording:
+            self.log_action("record_stop_clicked")
+            self.window.stop_recording()
+        else:
+            self.log_action("record_start_clicked")
+            self.window.start_recording()
+
+    def on_segment_duration_changed(self, minutes_text: str):
+        try:
+            minutes = int(minutes_text)
+        except ValueError:
+            return
+        self.log_action(f"segment_duration_changed:{minutes}")
+        self.window.set_segment_duration_minutes(minutes)
+
+    def on_take_image_clicked(self):
+        self.log_action("take_image_clicked")
+        self.window.take_snapshot()
+
     def on_move_pressed(self, move_value: str):
         self.log_action(f"move_pressed:{move_value}")
         if move_value in {"up", "right", "down", "left"}:
@@ -79,12 +103,9 @@ class ControllerActions:
             self.window.state.movement = move_value
             self._send_active_move()
             self.render_state()
-            if not self.repeat_timer.isActive():
-                self.repeat_timer.start()
         elif move_value == "home":
             self.active_move = None
-            self.repeat_timer.stop()
-            self.window.gimbal.stop()
+            self.window.gimbal.home()
             self.window.state.movement = "idle"
             self.render_state()
 
@@ -92,15 +113,9 @@ class ControllerActions:
         self.log_action(f"move_released:{move_value}")
         if self.active_move == move_value:
             self.active_move = None
-            self.repeat_timer.stop()
             self.window.gimbal.stop()
             self.window.state.movement = "idle"
             self.render_state()
-
-    def _emit_repeat_move(self):
-        if self.active_move:
-            self._send_active_move()
-            self.log_action(f"move_repeat:{self.active_move}")
 
     def _send_active_move(self):
         speed = self.window.state.speed
@@ -112,11 +127,6 @@ class ControllerActions:
             self.window.gimbal.move(speed, 0)
         elif self.active_move == "right":
             self.window.gimbal.move(-speed, 0)
-
-    @staticmethod
-    def _repeat_interval_from_speed(speed: int) -> int:
-        speed = max(0, min(100, int(speed)))
-        return int(220 - (speed * 1.8))
 
     def log_action(self, action: str):
         print(f"[UI_ACTION] {action}", flush=True)
@@ -131,6 +141,8 @@ class ControllerActions:
             w.stream_note.setText(message)
 
     def on_frame(self, frame):
+        self.window.update_latest_frame(frame)
+        self.window.write_recording_frame(frame)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
@@ -141,7 +153,7 @@ class ControllerActions:
         w.mode_left_btn.setChecked(w.state.mode == "manual")
         w.mode_right_btn.setChecked(w.state.mode == "auto")
         w.view_left_btn.setChecked(w.state.view == "thermal")
-        w.view_right_btn.setChecked(w.state.view == "video")
+        w.view_right_btn.setChecked(w.state.view == "visible")
 
         w.mode_val.setText(w.state.mode.title())
         w.view_val.setText(w.state.view.title())
