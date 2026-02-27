@@ -25,6 +25,7 @@ class ControllerActions:
         w.record_toggle_btn.clicked.connect(self.on_record_toggle_clicked)
         w.take_image_btn.clicked.connect(self.on_take_image_clicked)
         w.segment_duration_combo.currentTextChanged.connect(self.on_segment_duration_changed)
+        w.fullscreen_btn.clicked.connect(self.on_fullscreen_toggle_clicked)
         w.panel_toggle_btn.clicked.connect(self.on_panel_toggle_clicked)
 
         self.bind_move_button(w.btn_up, "up")
@@ -95,6 +96,10 @@ class ControllerActions:
     def on_take_image_clicked(self):
         self.log_action("take_image_clicked")
         self.window.take_snapshot()
+
+    def on_fullscreen_toggle_clicked(self):
+        self.log_action("fullscreen_toggle_clicked")
+        self.window.toggle_preview_fullscreen()
 
     def on_move_pressed(self, move_value: str):
         self.log_action(f"move_pressed:{move_value}")

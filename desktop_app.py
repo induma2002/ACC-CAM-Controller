@@ -227,6 +227,12 @@ class ControllerWindow(QMainWindow):
         self.segment_minutes = 5
         self.latest_frame = None
         self._active_keyboard_moves = set()
+        self._is_preview_fullscreen = False
+        self._panel_visible_before_fullscreen = True
+        self._normal_shell_margins = None
+        self._normal_shell_spacing = None
+        self._normal_stream_margins = None
+        self._normal_stream_spacing = None
 
         self._build_ui()
         self.actions = ControllerActions(self)
@@ -257,19 +263,25 @@ class ControllerWindow(QMainWindow):
         shell = QHBoxLayout(root)
         shell.setContentsMargins(14, 14, 14, 14)
         shell.setSpacing(14)
+        self.shell_layout = shell
 
         stream_panel = QFrame()
+        stream_panel.setObjectName("streamPanel")
         stream_layout = QVBoxLayout(stream_panel)
         stream_layout.setContentsMargins(12, 12, 12, 12)
         stream_layout.setSpacing(10)
+        self.stream_layout = stream_layout
 
         head = QHBoxLayout()
         title = QLabel("THERMAL CAMERA")
         title.setObjectName("title")
+        self.fullscreen_btn = QPushButton("Full Screen")
+        self.fullscreen_btn.setObjectName("fullScreenBtn")
         self.status_badge = QLabel("Connecting")
         self.status_badge.setObjectName("statusBadge")
         head.addWidget(title)
         head.addStretch()
+        head.addWidget(self.fullscreen_btn)
         head.addWidget(self.status_badge)
 
         self.stream_label = QLabel("Live Video Stream")
@@ -285,6 +297,7 @@ class ControllerWindow(QMainWindow):
         stream_layout.addLayout(head)
         stream_layout.addWidget(self.stream_label, 1)
         stream_layout.addWidget(self.stream_note)
+        self.stream_panel = stream_panel
 
         control_panel = QFrame()
         control_panel.setObjectName("controlPanel")
@@ -606,6 +619,63 @@ class ControllerWindow(QMainWindow):
         self.panel_visible = target_visible
         self._update_panel_toggle_ui()
 
+    def toggle_preview_fullscreen(self):
+        if self._is_preview_fullscreen:
+            self.exit_preview_fullscreen()
+        else:
+            self.enter_preview_fullscreen()
+
+    def enter_preview_fullscreen(self):
+        if self._is_preview_fullscreen:
+            return
+        self._panel_visible_before_fullscreen = self.panel_visible
+        self._normal_shell_margins = self.shell_layout.contentsMargins()
+        self._normal_shell_spacing = self.shell_layout.spacing()
+        self._normal_stream_margins = self.stream_layout.contentsMargins()
+        self._normal_stream_spacing = self.stream_layout.spacing()
+
+        self.shell_layout.setContentsMargins(0, 0, 0, 0)
+        self.shell_layout.setSpacing(0)
+        self.stream_layout.setContentsMargins(0, 0, 0, 0)
+        self.stream_layout.setSpacing(0)
+        self.stream_panel.setStyleSheet("QFrame#streamPanel { border: none; border-radius: 0; background: #000000; }")
+        self.stream_label.setStyleSheet("border: none; border-radius: 0; background: #000000;")
+        self.stream_note.hide()
+        self.control_panel.hide()
+        self.panel_toggle_btn.hide()
+        self.showFullScreen()
+        self.fullscreen_btn.setText("Exit Full")
+        self.fullscreen_btn.setToolTip("Exit full screen (Esc)")
+        self._is_preview_fullscreen = True
+
+    def exit_preview_fullscreen(self):
+        if not self._is_preview_fullscreen:
+            return
+        self.showNormal()
+        if self._normal_shell_margins is not None:
+            self.shell_layout.setContentsMargins(self._normal_shell_margins)
+        if self._normal_shell_spacing is not None:
+            self.shell_layout.setSpacing(self._normal_shell_spacing)
+        if self._normal_stream_margins is not None:
+            self.stream_layout.setContentsMargins(self._normal_stream_margins)
+        if self._normal_stream_spacing is not None:
+            self.stream_layout.setSpacing(self._normal_stream_spacing)
+        self.stream_panel.setStyleSheet("")
+        self.stream_label.setStyleSheet("")
+        self.stream_note.show()
+        self.control_panel.show()
+        self.panel_toggle_btn.show()
+        if self._panel_visible_before_fullscreen:
+            self.control_panel.setMaximumWidth(self.panel_expanded_width)
+            self.panel_visible = True
+        else:
+            self.control_panel.setMaximumWidth(0)
+            self.panel_visible = False
+        self._update_panel_toggle_ui()
+        self.fullscreen_btn.setText("Full Screen")
+        self.fullscreen_btn.setToolTip("Enter full screen (F)")
+        self._is_preview_fullscreen = False
+
     def _update_panel_toggle_ui(self):
         if self.panel_visible:
             self.panel_toggle_btn.setText("❯")
@@ -861,10 +931,17 @@ class ControllerWindow(QMainWindow):
                 background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #ff9152, stop:1 #ffd069);
                 color: #2f1804;
             }
+            #fullScreenBtn {
+                border-radius: 10px;
+                min-height: 32px;
+                padding: 6px 12px;
+            }
             """
         )
 
     def closeEvent(self, event):
+        if self._is_preview_fullscreen:
+            self.exit_preview_fullscreen()
         if hasattr(self, "recorder"):
             self.recorder.stop()
         if hasattr(self, "reader") and self.reader.isRunning():
@@ -884,7 +961,7 @@ class ControllerWindow(QMainWindow):
         if key_event is None:
             return super().eventFilter(watched, event)
 
-        handled_keys = {Qt.Key_Up, Qt.Key_Right, Qt.Key_Down, Qt.Key_Left}
+        handled_keys = {Qt.Key_Up, Qt.Key_Right, Qt.Key_Down, Qt.Key_Left, Qt.Key_F, Qt.Key_Escape}
         is_ctrl_h = key_event.key() == Qt.Key_H and (key_event.modifiers() & Qt.ControlModifier)
 
         if event.type() == QEvent.ShortcutOverride and (key_event.key() in handled_keys or is_ctrl_h):
@@ -901,6 +978,14 @@ class ControllerWindow(QMainWindow):
         return self._handle_key_release(key_event)
 
     def _handle_key_press(self, event: QKeyEvent) -> bool:
+        if event.key() == Qt.Key_F and event.modifiers() == Qt.NoModifier:
+            self.toggle_preview_fullscreen()
+            return True
+
+        if event.key() == Qt.Key_Escape and self._is_preview_fullscreen:
+            self.exit_preview_fullscreen()
+            return True
+
         key_to_move = {
             Qt.Key_Up: "up",
             Qt.Key_Right: "right",
