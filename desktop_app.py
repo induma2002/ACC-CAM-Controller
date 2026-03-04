@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -27,11 +28,12 @@ from PySide6.QtWidgets import (
 )
 
 from controller_actions import ControllerActions
+from constants import DEFAULT_CAMERA_IP, DEFAULT_GIMBAL_PORT, DEFAULT_RTSP_URL
 from viewpro_gimbal import ViewProGimbal
 
-CAMERA_RTSP_URL = "rtsp://192.168.2.119:554"
-GIMBAL_TCP_IP = "192.168.2.119"
-GIMBAL_TCP_PORT = 2000
+CAMERA_RTSP_URL = DEFAULT_RTSP_URL
+GIMBAL_TCP_IP = DEFAULT_CAMERA_IP
+GIMBAL_TCP_PORT = DEFAULT_GIMBAL_PORT
 
 
 @dataclass
@@ -50,14 +52,31 @@ class RtspReader(QThread):
         super().__init__()
         self.rtsp_url = rtsp_url
         self._running = True
+        self._cap_lock = threading.Lock()
+        self._cap = None
 
     def stop(self):
         self._running = False
         self.requestInterruption()
-        if not self.wait(35000):
+        self._release_capture()
+        if not self.wait(3000):
             # Last-resort guard to avoid "QThread destroyed while thread is still running".
             self.terminate()
-            self.wait(2000)
+            self.wait(1000)
+
+    def _set_capture(self, cap):
+        with self._cap_lock:
+            self._cap = cap
+
+    def _release_capture(self):
+        with self._cap_lock:
+            cap = self._cap
+            self._cap = None
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
 
     def _open_capture(self):
         attempts = [
@@ -96,6 +115,7 @@ class RtspReader(QThread):
                     time.sleep(reconnect_delay)
                     continue
 
+                self._set_capture(cap)
                 self.stream_status.emit(True, f"Connected ({transport.upper()})")
                 fail_count = 0
 
@@ -114,8 +134,7 @@ class RtspReader(QThread):
             except Exception as ex:
                 self.stream_status.emit(False, f"Stream error: {ex}. Reconnecting...")
             finally:
-                if cap is not None:
-                    cap.release()
+                self._release_capture()
 
             if self._running and not self.isInterruptionRequested():
                 time.sleep(reconnect_delay)

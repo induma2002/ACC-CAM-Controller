@@ -3,23 +3,13 @@ import threading
 import time
 import sys
 
-CAMERA_IP = "192.168.2.119"
-CAMERA_PORT = 2000
-TIMEOUT = 3.0
-
-# Rotating heartbeat packets (from your pcap)
-HEARTBEATS = [
-    bytes.fromhex("EB900755AADC8414099915"),
-    bytes.fromhex("EB900755AADCC41460B0C3"),
-    bytes.fromhex("EB900755AADC0414B3A349"),
-    bytes.fromhex("EB900755AADC44141B4B99"),
-]
-
-# Mode packets (verified from pcap)
-MODES = {
-    "visible": bytes.fromhex("EB901455AADC11300F00000000000000000381000000AC5B"),
-    "ir":      bytes.fromhex("EB901455AADC11300F00000000000000000382000000AF5F"),
-}
+from constants import (
+    CLI_HEARTBEATS as HEARTBEATS,
+    CLI_MODES as MODES,
+    DEFAULT_CAMERA_IP as CAMERA_IP,
+    DEFAULT_GIMBAL_PORT as CAMERA_PORT,
+    DEFAULT_SOCKET_TIMEOUT as TIMEOUT,
+)
 
 stop_event = threading.Event()
 
